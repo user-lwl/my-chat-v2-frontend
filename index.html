@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Chat</title>
+  <link rel="icon" href="src/favicon.ico">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1 class="title">My Chat</h1>
+    </header>
+    
+    <main class="chat-container">
+      <div id="messages" class="messages"></div>
+      
+      <div id="loading" class="loading" style="display: none;">
+        <div class="loading-spinner"></div>
+        <span>AI正在思考...</span>
+      </div>
+      
+      <div class="chat-input-area">
+        <div class="input-container">
+          <textarea id="chat-input" placeholder="输入消息..." rows="1"></textarea>
+        </div>
+        
+        <div class="controls-container">
+          <div class="model-selector">
+            <select id="model-select">
+              <option value="deepseek-chat" selected>DeepSeek-V3</option>
+              <option value="deepseek-reasoner">DeepSeek-R1</option>
+            </select>
+          </div>
+          
+          <button id="send-button" class="send-button">
+            发送 (Ctrl+Enter)
+          </button>
+        </div>
+      </div>
+    </main>
+    
+    <footer>
+      <div class="footer-content">
+        My Chat ©2025 by <a href="https://github.com/user-lwl" target="_blank">user-lwl</a> | 
+        <a href="https://beian.miit.gov.cn/" target="_blank">鲁ICP备2024080109号-2</a>
+      </div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html></div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
