@@ -142,13 +142,13 @@ async function fetchAIResponse(message) {
   let selectedModel = elements.modelSelect.value;
   // 根据选择映射到正确的API模型名称
   const modelMap = {
-    'deepseek-v3': 'deepseek-chat',    // DeepSeek-V3.1 非思考模式
-    'deepseek-r1': 'deepseek-reasoner' // DeepSeek-R1 思考模式
+    'deepseek-chat': 'deepseek-v4-flash',    // DeepSeek-V4 Flash
+    'deepseek-reasoner': 'deepseek-v4-pro' // DeepSeek-V4 Pro
   };
   selectedModel = modelMap[selectedModel] || selectedModel;
   
-  const apiKey = 'sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
-  const apiUrl = 'https://api.deepseek.com/v1/chat/completions';
+  const apiKey = 'xxxxx';
+  const apiUrl = 'https://api.deepseek.com/chat/completions';
   
   // 添加到对话历史
   conversationHistory.push({ role: 'user', content: message });
@@ -167,6 +167,13 @@ async function fetchAIResponse(message) {
   `;
   messageContent.appendChild(loadingElement);
   
+  // 构建请求参数
+  const requestBody = {
+    model: selectedModel,
+    messages: conversationHistory,
+    stream: true
+  };
+  
   try {
     const response = await fetch(apiUrl, {
       method: 'POST',
@@ -174,11 +181,7 @@ async function fetchAIResponse(message) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model: selectedModel,
-        messages: conversationHistory,
-        stream: true
-      })
+      body: JSON.stringify(requestBody)
     });
     
     if (!response.ok) {
@@ -289,13 +292,13 @@ function createMessageElement(type, content, isHTML = false) {
   return messageDiv;
 }
 
-// 格式化消息（处理代码块、公式块、加粗等）
+// 格式化消息（使用marked库处理Markdown，保留流式输出）
 function formatMessage(message) {
   if (!message) return '';
   
   // 先提取代码块，避免处理其中的Markdown
   const codeBlocks = [];
-  message = message.replace(/```([\w]*)\n([\s\S]*?)```/g, (match, language, code) => {
+  message = message.replace(/```([\w]*)(?:\n|\r\n)([\s\S]*?)```/g, (match, language, code) => {
     const languageDisplay = language.trim() ? language.trim() : 'code';
     const blockId = `code-block-${codeBlocks.length}`;
     codeBlocks.push({
@@ -327,24 +330,30 @@ function formatMessage(message) {
     return `<span class="inline-math" id="${blockId}"></span>`;
   });
   
-  // 处理Markdown标题（1-5级） - 只在非代码块中处理
-  message = message.replace(/^#\s+(.*)$/gm, '<h1 class="markdown-heading">$1</h1>');
-  message = message.replace(/^##\s+(.*)$/gm, '<h2 class="markdown-heading">$1</h2>');
-  message = message.replace(/^###\s+(.*)$/gm, '<h3 class="markdown-heading">$1</h3>');
-  message = message.replace(/^####\s+(.*)$/gm, '<h4 class="markdown-heading">$1</h4>');
-  message = message.replace(/^#####\s+(.*)$/gm, '<h5 class="markdown-heading">$1</h5>');
-  
-  // 处理水平线 - 匹配单独一行的三个或更多连字符
-  message = message.replace(/^---+$/gm, '<hr class="markdown-hr">');
-  
-  // 处理内联代码
-  message = message.replace(/`([^`]+)`/g, '<code style="background-color:#f0f0f0;padding:2px 4px;border-radius:3px;font-family:monospace;">$1</code>');
-  
-  // 处理加粗
-  message = message.replace(/\*\*(.*?)\*\*/g, '<span class="bold-text">$1</span>');
-  
-  // 处理换行
-  message = message.replace(/\n/g, '<br>');
+  // 使用marked库处理Markdown
+  if (typeof marked !== 'undefined') {
+    message = marked.parse(message);
+  } else {
+    // 降级处理：如果marked库未加载，使用简单的Markdown处理
+    // 处理Markdown标题（1-5级）
+    message = message.replace(/^#\s+(.*)$/gm, '<h1 class="markdown-heading">$1</h1>');
+    message = message.replace(/^##\s+(.*)$/gm, '<h2 class="markdown-heading">$1</h2>');
+    message = message.replace(/^###\s+(.*)$/gm, '<h3 class="markdown-heading">$1</h3>');
+    message = message.replace(/^####\s+(.*)$/gm, '<h4 class="markdown-heading">$1</h4>');
+    message = message.replace(/^#####\s+(.*)$/gm, '<h5 class="markdown-heading">$1</h5>');
+    
+    // 处理水平线
+    message = message.replace(/^---+$/gm, '<hr class="markdown-hr">');
+    
+    // 处理内联代码
+    message = message.replace(/`([^`]+)`/g, '<code style="background-color:#f0f0f0;padding:2px 4px;border-radius:3px;font-family:monospace;">$1</code>');
+    
+    // 处理加粗
+    message = message.replace(/\*\*(.*?)\*\*/g, '<span class="bold-text">$1</span>');
+    
+    // 处理换行
+    message = message.replace(/\n/g, '<br>');
+  }
   
   // 将代码块和公式块内容重新插入（不经过Markdown处理）
   setTimeout(() => {

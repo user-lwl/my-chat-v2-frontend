@@ -5,7 +5,7 @@
 ## 功能特点
 
 - 🎨 现代化UI设计，响应式布局
-- 💬 支持DeepSeek-V3和DeepSeek-R1两种AI模型
+- 💬 支持DeepSeek-V4 Flash和DeepSeek-V4 Pro两种AI模型
 - 📝 代码块语法高亮和一键复制功能
 - ➗ 数学公式渲染支持（使用KaTeX）
 - 📊 支持Markdown格式（标题、水平线、加粗等）
@@ -86,7 +86,7 @@ y = 2
 
 3. 在浏览器中访问
    ```
-   http://localhost:3000
+   http://localhost:3001
    ```
 
 ## 技术栈
