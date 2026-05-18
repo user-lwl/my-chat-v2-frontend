@@ -7,13 +7,74 @@
   <link rel="icon" href="src/favicon.ico">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
+  
+  <!-- Markdown解析库 -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  
+  <!-- 代码高亮库 - 使用浏览器版本，已包含常用语言 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/build/highlight.min.js"></script>
 </head>
 <body>
   <div id="app">
     <header>
       <h1 class="title">My Chat</h1>
+      <div class="user-area">
+        <button id="login-button" class="login-button">登录</button>
+        <div id="user-info" class="user-info" style="display: none;">
+          <button id="admin-stats-button" class="admin-button" style="display: none;">📊 统计</button>
+          <span id="username-display" class="username-display">用户名</span>
+          <button id="logout-button" class="logout-button">退出</button>
+        </div>
+      </div>
     </header>
+    
+    <!-- 登录注册弹窗 -->
+    <div id="auth-modal" class="auth-modal" style="display: none;">
+      <div class="auth-modal-content">
+        <button id="close-modal" class="close-modal">&times;</button>
+        
+        <!-- 登录表单 -->
+        <div id="login-form" class="auth-form">
+          <h2 class="auth-title">登录</h2>
+          <div class="form-group">
+            <label for="login-username">用户名</label>
+            <input type="text" id="login-username" placeholder="请输入用户名" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="login-password">密码</label>
+            <input type="password" id="login-password" placeholder="请输入密码" autocomplete="current-password">
+          </div>
+          <button id="submit-login" class="auth-button">登录</button>
+          <p class="auth-switch">
+            没有账号？<span id="switch-to-register" class="switch-link">立即注册</span>
+          </p>
+          <p id="login-error" class="auth-error" style="display: none;"></p>
+        </div>
+        
+        <!-- 注册表单 -->
+        <div id="register-form" class="auth-form" style="display: none;">
+          <h2 class="auth-title">注册</h2>
+          <div class="form-group">
+            <label for="register-username">用户名</label>
+            <input type="text" id="register-username" placeholder="请输入用户名（3-20个字符）" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="register-password">密码</label>
+            <input type="password" id="register-password" placeholder="请输入密码（至少6个字符）" autocomplete="new-password">
+          </div>
+          <div class="form-group">
+            <label for="register-confirm-password">确认密码</label>
+            <input type="password" id="register-confirm-password" placeholder="请再次输入密码" autocomplete="new-password">
+          </div>
+          <button id="submit-register" class="auth-button">注册</button>
+          <p class="auth-switch">
+            已有账号？<span id="switch-to-login" class="switch-link">立即登录</span>
+          </p>
+          <p id="register-error" class="auth-error" style="display: none;"></p>
+        </div>
+      </div>
+    </div>
     
     <main class="chat-container">
       <div id="messages" class="messages"></div>
@@ -31,8 +92,8 @@
         <div class="controls-container">
           <div class="model-selector">
             <select id="model-select">
-              <option value="deepseek-chat" selected>DeepSeek-V4 Flash</option>
-              <option value="deepseek-reasoner">DeepSeek-V4 Pro</option>
+              <option value="deepseek-v4-flash" selected>DeepSeek-V4 Flash</option>
+<!--              <option value="deepseek-v4-pro">DeepSeek-V4 Pro</option>-->
             </select>
           </div>
           
@@ -43,9 +104,55 @@
       </div>
     </main>
     
+    <!-- 管理员统计页面 -->
+    <div id="stats-modal" class="stats-modal" style="display: none;">
+      <div class="stats-modal-content">
+        <div class="stats-header">
+          <h2>用户Token消耗统计</h2>
+          <button id="close-stats" class="close-stats">&times;</button>
+        </div>
+        
+        <div class="stats-summary">
+          <div class="stat-card">
+            <div class="stat-value" id="total-users">0</div>
+            <div class="stat-label">总用户数</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="total-tokens">0</div>
+            <div class="stat-label">总消耗Token</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="total-usage">0</div>
+            <div class="stat-label">总对话次数</div>
+          </div>
+        </div>
+        
+        <div class="stats-table-container">
+          <table class="stats-table">
+            <thead>
+              <tr>
+                <th>用户ID</th>
+                <th>用户名</th>
+                <th>角色</th>
+                <th>输入Token</th>
+                <th>输出Token</th>
+                <th>总Token</th>
+                <th>对话次数</th>
+              </tr>
+            </thead>
+            <tbody id="stats-table-body">
+              <tr>
+                <td colspan="7" class="loading-row">加载中...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    
     <footer>
       <div class="footer-content">
-        My Chat ©2025 by <a href="https://github.com/user-lwl" target="_blank">user-lwl</a> | 
+        My Chat ©2025 by <a href="https://www.user-lwl.cn/" target="_blank">user-lwl</a> |
         <a href="https://beian.miit.gov.cn/" target="_blank">鲁ICP备2024080109号-3</a>
       </div>
     </footer>

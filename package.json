@@ -1,0 +1,21 @@
+{
+  "name": "my-chat-v2-frontend",
+  "version": "2.0.0",
+  "description": "My Chat V2 - AI聊天应用",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "chat",
+    "ai",
+    "deepseek"
+  ],
+  "author": "user-lwl",
+  "license": "MIT",
+  "dependencies": {
+    "mysql2": "^3.9.0",
+    "bcryptjs": "^2.4.3"
+  }
+}
