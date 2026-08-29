@@ -76,33 +76,46 @@
       </div>
     </div>
     
-    <main class="chat-container">
-      <div id="messages" class="messages"></div>
+    <div class="main-layout">
+      <!-- 左侧对话记录栏 -->
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+          <span class="sidebar-title">对话记录</span>
+          <button id="new-chat-button" class="new-chat-button" title="新建对话">+ 新对话</button>
+        </div>
+        <div id="conversation-list" class="conversation-list">
+          <div class="conversation-empty">暂无历史对话</div>
+        </div>
+      </aside>
       
-      <div id="loading" class="loading" style="display: none;">
-        <div class="loading-spinner"></div>
-        <span>AI正在思考...</span>
-      </div>
-      
-      <div class="chat-input-area">
-        <div class="input-container">
-          <textarea id="chat-input" placeholder="输入消息..." rows="1"></textarea>
+      <main class="chat-container">
+        <div id="messages" class="messages"></div>
+        
+        <div id="loading" class="loading" style="display: none;">
+          <div class="loading-spinner"></div>
+          <span>AI正在思考...</span>
         </div>
         
-        <div class="controls-container">
-          <div class="model-selector">
-            <select id="model-select">
-              <option value="deepseek-v4-flash" selected>DeepSeek-V4 Flash</option>
-<!--              <option value="deepseek-v4-pro">DeepSeek-V4 Pro</option>-->
-            </select>
+        <div class="chat-input-area">
+          <div class="input-container">
+            <textarea id="chat-input" placeholder="输入消息..." rows="1"></textarea>
           </div>
           
-          <button id="send-button" class="send-button">
-            发送 (Ctrl+Enter)
-          </button>
+          <div class="controls-container">
+            <div class="model-selector">
+              <select id="model-select">
+                <option value="deepseek-v4-flash" selected>DeepSeek-V4 Flash</option>
+<!--              <option value="deepseek-v4-pro">DeepSeek-V4 Pro</option>-->
+              </select>
+            </div>
+            
+            <button id="send-button" class="send-button">
+              发送 (Ctrl+Enter)
+            </button>
+          </div>
         </div>
-      </div>
-    </main>
+      </main>
+    </div>
     
     <!-- 管理员统计页面 -->
     <div id="stats-modal" class="stats-modal" style="display: none;">

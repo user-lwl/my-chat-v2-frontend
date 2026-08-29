@@ -85,9 +85,23 @@ async function initDatabase() {
 const memoryStorage = {
   users: [],
   tokenUsage: [],
+  conversations: [],
+  chatMessages: [],
   nextUserId: 1,
-  nextTokenUsageId: 1
+  nextTokenUsageId: 1,
+  nextConversationId: 1,
+  nextChatMessageId: 1
 };
+
+// ============================================================
+// 对话历史配置
+// ============================================================
+// 触发摘要压缩的最大历史消息条数（超过则对最早的旧消息进行摘要压缩）
+const SUMMARY_TRIGGER_MESSAGE_COUNT = 8;
+// 压缩后保留的最近消息条数（保留最近几条原文）
+const SUMMARY_KEEP_RECENT_COUNT = 4;
+// 摘要提示词
+const SUMMARY_PROMPT = `请对以下对话历史进行简洁、准确的摘要总结，保留关键信息和上下文脉络，使用中文，控制在200字以内，直接输出摘要内容，不要添加任何额外说明或前缀。`;
 
 // 生成会话ID
 function generateSessionId() {
@@ -229,6 +243,257 @@ async function logTokenUsage(userId, model, inputTokens, outputTokens) {
       total_tokens: totalTokens,
       created_at: new Date()
     });
+  }
+}
+
+// ============================================================
+// 对话历史辅助函数
+// ============================================================
+
+// 创建对话会话
+async function createConversation(userId, model, title) {
+  const convTitle = title || '新对话';
+  if (pool) {
+    const [result] = await pool.query(
+      'INSERT INTO conversations (user_id, title, model) VALUES (?, ?, ?)',
+      [userId, convTitle, model || 'deepseek-v4-flash']
+    );
+    return { id: result.insertId, user_id: userId, title: convTitle, model: model || 'deepseek-v4-flash' };
+  } else {
+    const conv = {
+      id: memoryStorage.nextConversationId++,
+      user_id: userId,
+      title: convTitle,
+      model: model || 'deepseek-v4-flash',
+      summary: '',
+      summary_message_count: 0,
+      message_count: 0,
+      is_active: 1,
+      created_at: new Date(),
+      updated_at: new Date()
+    };
+    memoryStorage.conversations.push(conv);
+    return { id: conv.id, user_id: userId, title: convTitle, model: conv.model };
+  }
+}
+
+// 获取用户的对话列表（按最后活跃时间倒序）
+async function listConversations(userId) {
+  if (pool) {
+    const [rows] = await pool.query(
+      `SELECT id, title, model, message_count, updated_at 
+       FROM conversations 
+       WHERE user_id = ? AND is_active = 1 
+       ORDER BY updated_at DESC`,
+      [userId]
+    );
+    return rows;
+  } else {
+    return memoryStorage.conversations
+      .filter(c => c.user_id === userId && c.is_active === 1)
+      .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+      .map(c => ({ id: c.id, title: c.title, model: c.model, message_count: c.message_count, updated_at: c.updated_at }));
+  }
+}
+
+// 获取单个对话详情
+async function getConversation(conversationId, userId) {
+  if (pool) {
+    const [rows] = await pool.query(
+      'SELECT * FROM conversations WHERE id = ? AND user_id = ? AND is_active = 1',
+      [conversationId, userId]
+    );
+    if (rows.length === 0) return null;
+    const conv = rows[0];
+    const [msgs] = await pool.query(
+      'SELECT id, role, content FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC',
+      [conversationId]
+    );
+    return { conversation: conv, messages: msgs };
+  } else {
+    const conv = memoryStorage.conversations.find(c => c.id === conversationId && c.user_id === userId && c.is_active === 1);
+    if (!conv) return null;
+    const msgs = memoryStorage.chatMessages
+      .filter(m => m.conversation_id === conversationId)
+      .sort((a, b) => a.id - b.id)
+      .map(m => ({ id: m.id, role: m.role, content: m.content }));
+    return { conversation: conv, messages: msgs };
+  }
+}
+
+// 获取某会话的所有消息（用于构建多轮对话上下文）
+async function getConversationMessages(conversationId) {
+  if (pool) {
+    const [rows] = await pool.query(
+      'SELECT id, role, content FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC',
+      [conversationId]
+    );
+    return rows;
+  } else {
+    return memoryStorage.chatMessages
+      .filter(m => m.conversation_id === conversationId)
+      .sort((a, b) => a.id - b.id)
+      .map(m => ({ id: m.id, role: m.role, content: m.content }));
+  }
+}
+
+// 保存一条消息
+async function saveMessage(conversationId, role, content) {
+  if (pool) {
+    await pool.query(
+      'INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)',
+      [conversationId, role, content]
+    );
+    await pool.query(
+      'UPDATE conversations SET message_count = message_count + 1 WHERE id = ?',
+      [conversationId]
+    );
+  } else {
+    memoryStorage.chatMessages.push({
+      id: memoryStorage.nextChatMessageId++,
+      conversation_id: conversationId,
+      role,
+      content,
+      created_at: new Date()
+    });
+    const conv = memoryStorage.conversations.find(c => c.id === conversationId);
+    if (conv) {
+      conv.message_count = (conv.message_count || 0) + 1;
+      conv.updated_at = new Date();
+    }
+  }
+}
+
+// 更新对话标题（使用第一条用户消息的前N个字符）
+async function updateConversationTitle(conversationId, title) {
+  const shortTitle = title.length > 50 ? title.substring(0, 50) + '...' : title;
+  if (pool) {
+    await pool.query('UPDATE conversations SET title = ? WHERE id = ?', [shortTitle, conversationId]);
+  } else {
+    const conv = memoryStorage.conversations.find(c => c.id === conversationId);
+    if (conv) conv.title = shortTitle;
+  }
+}
+
+// 保存压缩摘要到会话
+async function saveConversationSummary(conversationId, summary, summaryMessageCount) {
+  if (pool) {
+    await pool.query(
+      'UPDATE conversations SET summary = ?, summary_message_count = ? WHERE id = ?',
+      [summary, summaryMessageCount, conversationId]
+    );
+  } else {
+    const conv = memoryStorage.conversations.find(c => c.id === conversationId);
+    if (conv) {
+      conv.summary = summary;
+      conv.summary_message_count = summaryMessageCount;
+    }
+  }
+}
+
+// 获取会话的摘要（用于对话记忆）
+async function getConversationSummary(conversationId) {
+  if (pool) {
+    const [rows] = await pool.query(
+      'SELECT summary FROM conversations WHERE id = ?',
+      [conversationId]
+    );
+    return rows.length > 0 ? (rows[0].summary || '') : '';
+  } else {
+    const conv = memoryStorage.conversations.find(c => c.id === conversationId);
+    return conv ? (conv.summary || '') : '';
+  }
+}
+
+// 删除对话（软删除）
+async function deleteConversation(conversationId, userId) {
+  if (pool) {
+    await pool.query(
+      'UPDATE conversations SET is_active = 0 WHERE id = ? AND user_id = ?',
+      [conversationId, userId]
+    );
+  } else {
+    const conv = memoryStorage.conversations.find(c => c.id === conversationId && c.user_id === userId);
+    if (conv) conv.is_active = 0;
+  }
+}
+
+// 调用 DeepSeek 生成摘要（非流式）
+function callDeepSeekForSummary(messages) {
+  return new Promise((resolve, reject) => {
+    const requestBody = {
+      model: MODEL_MAP['deepseek-v4-flash'] || 'deepseek-v4-flash',
+      messages: messages,
+      stream: false
+    };
+    
+    const deepseekUrl = new url.URL(DEEPSEEK_BASE_URL);
+    const chatEndpoint = deepseekUrl.pathname.endsWith('/')
+      ? `${deepseekUrl.pathname}chat/completions`
+      : `${deepseekUrl.pathname}/chat/completions`;
+
+    const deepseekOptions = {
+      hostname: deepseekUrl.hostname,
+      port: deepseekUrl.port || 443,
+      path: chatEndpoint,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+      }
+    };
+
+    const req = https.request(deepseekOptions, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          return reject(new Error(`DeepSeek摘要请求失败: ${res.statusCode} ${data}`));
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const summary = parsed.choices?.[0]?.message?.content || '';
+          resolve(summary.trim());
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(JSON.stringify(requestBody));
+    req.end();
+  });
+}
+
+// 生成并保存摘要（对旧消息压缩，保留最近消息原文）
+async function summarizeConversation(conversationId, allMessages) {
+  try {
+    // 需要压缩的消息 = 总消息 - 保留的最近消息
+    const toSummarize = allMessages.slice(0, Math.max(0, allMessages.length - SUMMARY_KEEP_RECENT_COUNT));
+    if (toSummarize.length === 0) return;
+
+    // 获取已有摘要
+    const existingSummary = await getConversationSummary(conversationId);
+
+    // 构建用于摘要的消息（已有摘要 + 本次需压缩的旧消息）
+    const summarizeMessages = [];
+    if (existingSummary) {
+      summarizeMessages.push({ role: 'system', content: existingSummary });
+    }
+    toSummarize.forEach(m => {
+      summarizeMessages.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content });
+    });
+    summarizeMessages.push({ role: 'user', content: SUMMARY_PROMPT });
+
+    const summary = await callDeepSeekForSummary(summarizeMessages);
+
+    // 保存摘要及已压缩条数
+    const compressedCount = (existingSummary ? toSummarize.length + 0 : toSummarize.length);
+    await saveConversationSummary(conversationId, summary, toSummarize.length);
+    console.log(`会话 ${conversationId} 已生成摘要`);
+  } catch (error) {
+    console.error('生成摘要失败:', error.message);
+    // 摘要失败不影响对话流程
   }
 }
 
@@ -437,7 +702,102 @@ async function handleAPIRequest(req, res, parsedUrl) {
       }
     }
     
-    // 聊天API接口（代理DeepSeek）
+    // 创建新对话接口
+    if (pathname === '/api/conversations' && method === 'POST') {
+      const cookies = parseCookies(req);
+      const sessionId = cookies.sessionId;
+      
+      if (!sessionId || !sessions.has(sessionId)) {
+        return sendJSON(res, 401, { success: false, message: '未登录' });
+      }
+      
+      const session = sessions.get(sessionId);
+      const body = await parseBody(req);
+      const { model, title } = body;
+      
+      try {
+        const conversation = await createConversation(session.userId, model, title);
+        return sendJSON(res, 200, { success: true, data: conversation });
+      } catch (error) {
+        console.error('创建对话失败:', error);
+        return sendJSON(res, 500, { success: false, message: '创建对话失败: ' + error.message });
+      }
+    }
+    
+    // 获取对话列表接口
+    if (pathname === '/api/conversations' && method === 'GET') {
+      const cookies = parseCookies(req);
+      const sessionId = cookies.sessionId;
+      
+      if (!sessionId || !sessions.has(sessionId)) {
+        return sendJSON(res, 401, { success: false, message: '未登录' });
+      }
+      
+      const session = sessions.get(sessionId);
+      
+      try {
+        const conversations = await listConversations(session.userId);
+        return sendJSON(res, 200, { success: true, data: conversations });
+      } catch (error) {
+        console.error('获取对话列表失败:', error);
+        return sendJSON(res, 500, { success: false, message: '获取对话列表失败: ' + error.message });
+      }
+    }
+    
+    // 获取单个对话详情接口
+    if (pathname.startsWith('/api/conversations/') && method === 'GET') {
+      const cookies = parseCookies(req);
+      const sessionId = cookies.sessionId;
+      
+      if (!sessionId || !sessions.has(sessionId)) {
+        return sendJSON(res, 401, { success: false, message: '未登录' });
+      }
+      
+      const session = sessions.get(sessionId);
+      const conversationId = parseInt(pathname.split('/')[3], 10);
+      
+      if (!conversationId) {
+        return sendJSON(res, 400, { success: false, message: '对话ID无效' });
+      }
+      
+      try {
+        const data = await getConversation(conversationId, session.userId);
+        if (!data) {
+          return sendJSON(res, 404, { success: false, message: '对话不存在' });
+        }
+        return sendJSON(res, 200, { success: true, data });
+      } catch (error) {
+        console.error('获取对话详情失败:', error);
+        return sendJSON(res, 500, { success: false, message: '获取对话详情失败: ' + error.message });
+      }
+    }
+    
+    // 删除对话接口
+    if (pathname.startsWith('/api/conversations/') && method === 'DELETE') {
+      const cookies = parseCookies(req);
+      const sessionId = cookies.sessionId;
+      
+      if (!sessionId || !sessions.has(sessionId)) {
+        return sendJSON(res, 401, { success: false, message: '未登录' });
+      }
+      
+      const session = sessions.get(sessionId);
+      const conversationId = parseInt(pathname.split('/')[3], 10);
+      
+      if (!conversationId) {
+        return sendJSON(res, 400, { success: false, message: '对话ID无效' });
+      }
+      
+      try {
+        await deleteConversation(conversationId, session.userId);
+        return sendJSON(res, 200, { success: true, message: '删除成功' });
+      } catch (error) {
+        console.error('删除对话失败:', error);
+        return sendJSON(res, 500, { success: false, message: '删除对话失败: ' + error.message });
+      }
+    }
+    
+    // 聊天API接口（代理DeepSeek，支持对话记忆与摘要压缩）
     if (pathname === '/api/chat' && method === 'POST') {
       const cookies = parseCookies(req);
       const sessionId = cookies.sessionId;
@@ -448,7 +808,7 @@ async function handleAPIRequest(req, res, parsedUrl) {
       
       const session = sessions.get(sessionId);
       const body = await parseBody(req);
-      const { model, messages } = body;
+      const { model, messages, conversationId } = body;
       
       if (!model || !messages || !Array.isArray(messages) || messages.length === 0) {
         return sendJSON(res, 400, { success: false, message: '缺少必要参数' });
@@ -457,10 +817,70 @@ async function handleAPIRequest(req, res, parsedUrl) {
       // 映射模型名称
       const mappedModel = MODEL_MAP[model] || model;
       
+      // ---- 对话历史保存与对话记忆逻辑 ----
+      // 确定会话ID：若未指定则创建一个新会话
+      let convId = conversationId;
+      let isNewConversation = false;
+      let savedAssistantContent = null;
+      let shouldSummarizeAfter = false;
+      let allMessagesAfterSave = null;
+      let deepSeekMessages = null;
+      
+      try {
+        // 如果没有 conversationId，创建新会话
+        if (!convId) {
+          const conv = await createConversation(session.userId, model);
+          convId = conv.id;
+          isNewConversation = true;
+          // 更新标题为第一条用户消息
+          const firstUserMsg = messages.find(m => m.role === 'user');
+          if (firstUserMsg && firstUserMsg.content) {
+            await updateConversationTitle(convId, firstUserMsg.content);
+          }
+        } else {
+          // 校验会话归属
+          const convData = await getConversation(convId, session.userId);
+          if (!convData) {
+            return sendJSON(res, 403, { success: false, message: '无权访问该对话' });
+          }
+        }
+        
+        // 保存用户消息到历史
+        const lastMessage = messages[messages.length - 1];
+        if (lastMessage && lastMessage.role === 'user') {
+          await saveMessage(convId, 'user', lastMessage.content);
+        }
+        
+        // 构建发送给DeepSeek的消息（含对话记忆：摘要 + 最近消息）
+        // 获取已有摘要作为记忆
+        const summary = await getConversationSummary(convId);
+        // 获取该会话最近的消息作为上下文（从数据库读取，含刚保存的用户消息）
+        allMessagesAfterSave = await getConversationMessages(convId);
+        
+        if (summary) {
+          // 有摘要：使用摘要 + 最近消息（不含已被压缩进摘要的旧消息）
+          const recentMessages = allMessagesAfterSave.slice(allMessagesAfterSave.length - SUMMARY_KEEP_RECENT_COUNT);
+          deepSeekMessages = [
+            { role: 'system', content: `以下是这段对话的早期摘要，请在此基础上继续对话：\n${summary}` },
+            ...recentMessages.map(m => ({ role: m.role, content: m.content }))
+          ];
+        } else {
+          // 无摘要：直接使用全部消息
+          deepSeekMessages = messages;
+        }
+        
+        // 判断是否需要压缩（消息条数达到阈值）
+        if (allMessagesAfterSave.length >= SUMMARY_TRIGGER_MESSAGE_COUNT) {
+          shouldSummarizeAfter = true;
+        }
+      } catch (error) {
+        console.error('对话历史处理失败:', error);
+      }
+      
       // 构建DeepSeek请求
       const requestBody = {
         model: mappedModel,
-        messages: messages,
+        messages: (deepSeekMessages && deepSeekMessages.length) ? deepSeekMessages : messages,
         stream: true
       };
       
@@ -507,10 +927,50 @@ async function handleAPIRequest(req, res, parsedUrl) {
         
         // 代理DeepSeek的流式响应
         deepseekRes.on('data', (chunk) => {
+          // 解析流式数据，提取助手回复内容（用于保存到历史）
+          const chunkStr = chunk.toString();
+          const lines = chunkStr.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('data:')) {
+              const dataStr = line.substring(5).trim();
+              if (dataStr && dataStr !== '[DONE]') {
+                try {
+                  const data = JSON.parse(dataStr);
+                  const delta = data.choices?.[0]?.delta;
+                  if (delta && delta.content && typeof delta.content === 'string') {
+                    savedAssistantContent = (savedAssistantContent || '') + delta.content;
+                  }
+                } catch (e) {
+                  // 忽略解析错误
+                }
+              }
+            }
+          }
           res.write(chunk);
         });
         
-        deepseekRes.on('end', () => {
+        deepseekRes.on('end', async () => {
+          // 保存助手回复到历史
+          if (convId && savedAssistantContent) {
+            try {
+              await saveMessage(convId, 'assistant', savedAssistantContent);
+              
+              // 如果需要压缩摘要，异步进行（不影响响应）
+              if (shouldSummarizeAfter && allMessagesAfterSave) {
+                // 异步触发，不阻塞响应
+                setTimeout(async () => {
+                  const msgs = await getConversationMessages(convId);
+                  await summarizeConversation(convId, msgs);
+                }, 0);
+              }
+            } catch (error) {
+              console.error('保存助手消息失败:', error);
+            }
+          }
+          // 发送会话ID事件，供前端识别当前对话
+          if (convId) {
+            res.write(`data: ${JSON.stringify({ conversation_id: convId })}\n\n`);
+          }
           res.end();
         });
         

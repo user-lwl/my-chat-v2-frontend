@@ -8,6 +8,8 @@ var isProcessing = false;
 var conversationHistory = [];
 var currentUser = null;
 var isLoggedIn = false;
+var currentConversationId = null;   // 当前对话ID（null表示新对话）
+var conversationList = [];          // 对话列表缓存
 
 // DOM 元素
 var elements = {
@@ -46,7 +48,11 @@ var elements = {
   statsTableBody: document.getElementById('stats-table-body'),
   totalUsers: document.getElementById('total-users'),
   totalTokens: document.getElementById('total-tokens'),
-  totalUsage: document.getElementById('total-usage')
+  totalUsage: document.getElementById('total-usage'),
+  // 对话记录栏
+  newChatButton: document.getElementById('new-chat-button'),
+  conversationList: document.getElementById('conversation-list'),
+  sidebar: document.getElementById('sidebar')
 };
 
 // API基础URL
@@ -182,6 +188,9 @@ function setupEventListeners() {
   // 管理员统计页面
   elements.adminStatsButton.addEventListener('click', openStatsModal);
   elements.closeStats.addEventListener('click', closeStatsModal);
+  
+  // 新建对话
+  elements.newChatButton.addEventListener('click', startNewConversation);
 }
 
 // 检查登录状态
@@ -219,6 +228,9 @@ function updateAuthUI() {
     
     // 启用聊天功能
     enableChat();
+    
+    // 加载对话列表
+    loadConversations();
     
     // 显示欢迎消息（包含用户名和角色标识）
     if (!window.__welcomeDisplayed) {
@@ -481,9 +493,13 @@ async function handleLogout() {
   isLoggedIn = false;
   currentUser = null;
   conversationHistory = [];
-  
+  currentConversationId = null;
+  conversationList = [];
+
   // 清除聊天记录，显示未登录提示
   elements.messagesContainer.innerHTML = '';
+  // 清空对话列表
+  elements.conversationList.innerHTML = '<div class="conversation-empty">暂无历史对话</div>';
   window.__welcomeDisplayed = false;
   updateAuthUI();
 }
@@ -526,6 +542,14 @@ async function handleSendMessage() {
     // 记录Token消耗
     if (result && result.tokenUsage) {
       await logTokenUsage(result.tokenUsage);
+    }
+    
+    // 发送成功后刷新对话列表（新会话首次发送后显示在列表中）
+    if (result && result.conversationId) {
+      currentConversationId = result.conversationId;
+      await loadConversations();
+    } else {
+      await loadConversations();
     }
   } catch (error) {
     console.error('Error:', error);
@@ -573,7 +597,8 @@ async function fetchAIResponse(message) {
       credentials: 'include',
       body: JSON.stringify({
         model: selectedModel,
-        messages: conversationHistory
+        messages: conversationHistory,
+        conversationId: currentConversationId
       })
     });
     
@@ -585,6 +610,7 @@ async function fetchAIResponse(message) {
     const decoder = new TextDecoder();
     let fullResponse = '';
     let buffer = '';  // 用于缓冲不完整的数据
+    let responseConversationId = null;  // 流中返回的会话ID
     
     while (true) {
       const { done, value } = await reader.read();
@@ -622,6 +648,12 @@ async function fetchAIResponse(message) {
           // 检查是否有错误
           if (data.error) {
             throw new Error(data.error);
+          }
+          
+          // 捕获后端返回的会话ID
+          if (data.conversation_id) {
+            responseConversationId = data.conversation_id;
+            currentConversationId = data.conversation_id;
           }
           
           // 获取delta内容（可能是content或reasoning_content）
@@ -689,6 +721,13 @@ async function fetchAIResponse(message) {
       if (dataStr && dataStr !== '[DONE]') {
         try {
           const data = JSON.parse(dataStr);
+          
+          // 捕获后端返回的会话ID
+          if (data.conversation_id) {
+            responseConversationId = data.conversation_id;
+            currentConversationId = data.conversation_id;
+          }
+          
           const delta = data.choices?.[0]?.delta;
           if (delta) {
             let content = delta.content;
@@ -736,6 +775,7 @@ async function fetchAIResponse(message) {
     
     return {
       content: fullResponse,
+      conversationId: responseConversationId,
       tokenUsage: {
         model: selectedModel,
         inputTokens: inputTokens,
@@ -1144,4 +1184,209 @@ function formatNumber(num) {
 // 滚动到底部
 function scrollToBottom() {
   elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+}
+
+// ==================== 对话记录栏功能函数 ====================
+
+// 加载对话列表
+async function loadConversations() {
+  if (!isLoggedIn) return;
+  
+  try {
+    const response = await fetch(`${API_BASE}/api/conversations`, {
+      method: 'GET',
+      credentials: 'include'
+    });
+    const data = await response.json();
+    
+    if (data.success && data.data) {
+      conversationList = data.data;
+      renderConversationList();
+    }
+  } catch (error) {
+    console.error('加载对话列表失败:', error);
+  }
+}
+
+// 渲染对话列表
+function renderConversationList() {
+  const container = elements.conversationList;
+  
+  if (!conversationList || conversationList.length === 0) {
+    container.innerHTML = '<div class="conversation-empty">暂无历史对话</div>';
+    return;
+  }
+  
+  container.innerHTML = conversationList.map(conv => {
+    const isActive = currentConversationId === conv.id ? 'active' : '';
+    const time = formatConversationTime(conv.updated_at);
+    return `
+      <div class="conversation-item ${isActive}" data-id="${conv.id}" title="${escapeHTML(conv.title)}">
+        <div class="conv-info">
+          <div class="conv-title">${escapeHTML(conv.title)}</div>
+          <div class="conv-time">${time}</div>
+        </div>
+        <button class="conv-delete" data-id="${conv.id}" title="删除对话">&times;</button>
+      </div>
+    `;
+  }).join('');
+  
+  // 绑定事件
+  container.querySelectorAll('.conversation-item').forEach(item => {
+    // 点击对话主体（不含删除按钮）打开对话
+    item.querySelector('.conv-info').addEventListener('click', () => {
+      openConversation(parseInt(item.dataset.id, 10));
+    });
+  });
+  
+  container.querySelectorAll('.conv-delete').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteConversation(parseInt(btn.dataset.id, 10));
+    });
+  });
+}
+
+// 格式化对话时间
+function formatConversationTime(datetime) {
+  if (!datetime) return '';
+  const date = new Date(datetime);
+  if (isNaN(date.getTime())) return '';
+  
+  const now = new Date();
+  const diff = now - date;
+  
+  // 今天
+  const isToday = date.toDateString() === now.toDateString();
+  if (isToday) {
+    return `今天 ${padZero(date.getHours())}:${padZero(date.getMinutes())}`;
+  }
+  
+  // 昨天
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) {
+    return `昨天 ${padZero(date.getHours())}:${padZero(date.getMinutes())}`;
+  }
+  
+  // 一周内
+  if (diff < 7 * 24 * 60 * 60 * 1000) {
+    const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    return days[date.getDay()];
+  }
+  
+  // 更早
+  return `${date.getFullYear()}-${padZero(date.getMonth() + 1)}-${padZero(date.getDate())}`;
+}
+
+function padZero(num) {
+  return num < 10 ? '0' + num : '' + num;
+}
+
+// 新建对话
+function startNewConversation() {
+  // 重置当前对话ID和历史
+  currentConversationId = null;
+  conversationHistory = [];
+  
+  // 清空消息区并显示欢迎消息
+  elements.messagesContainer.innerHTML = '';
+  displayBotMessage(`👋 有什么我可以帮助你的吗？开始一段新的对话吧！`);
+  
+  // 高亮重置
+  elements.conversationList.querySelectorAll('.conversation-item.active').forEach(item => {
+    item.classList.remove('active');
+  });
+  
+  // 聚焦输入框
+  elements.chatInput.focus();
+}
+
+// 打开历史对话
+async function openConversation(conversationId) {
+  if (!isLoggedIn || isProcessing) return;
+  
+  try {
+    const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`, {
+      method: 'GET',
+      credentials: 'include'
+    });
+    const data = await response.json();
+    
+    if (!data.success || !data.data) {
+      console.error('打开对话失败:', data.message);
+      return;
+    }
+    
+    const conv = data.data.conversation;
+    const messages = data.data.messages;
+    
+    // 设置当前会话ID
+    currentConversationId = conversationId;
+    
+    // 重建对话历史（用于多轮对话上下文）
+    conversationHistory = messages
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .map(m => ({ role: m.role, content: m.content }));
+    
+    // 渲染消息
+    elements.messagesContainer.innerHTML = '';
+    
+    if (messages.length === 0) {
+      displayBotMessage('这个对话还没有消息。');
+    } else {
+      messages.forEach(msg => {
+        if (msg.role === 'user') {
+          displayUserMessage(msg.content);
+        } else if (msg.role === 'assistant') {
+          displayBotMessage(msg.content);
+        }
+      });
+    }
+    
+    // 更新高亮
+    elements.conversationList.querySelectorAll('.conversation-item').forEach(item => {
+      item.classList.toggle('active', parseInt(item.dataset.id, 10) === conversationId);
+    });
+    
+    // 聚焦输入框
+    elements.chatInput.focus();
+  } catch (error) {
+    console.error('打开对话失败:', error);
+  }
+}
+
+// 删除对话
+async function deleteConversation(conversationId) {
+  if (!isLoggedIn) return;
+  
+  if (!confirm('确定要删除这个对话吗？此操作不可恢复。')) {
+    return;
+  }
+  
+  try {
+    const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    });
+    const data = await response.json();
+    
+    if (data.success) {
+      // 如果删除的是当前对话，重置
+      if (currentConversationId === conversationId) {
+        currentConversationId = null;
+        conversationHistory = [];
+        elements.messagesContainer.innerHTML = '';
+        displayBotMessage(`👋 对话已删除。有什么我可以帮助你的吗？`);
+      }
+      
+      // 刷新列表
+      await loadConversations();
+    } else {
+      alert(data.message || '删除失败');
+    }
+  } catch (error) {
+    console.error('删除对话失败:', error);
+    alert('删除对话失败，请稍后再试');
+  }
 }

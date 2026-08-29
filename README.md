@@ -16,6 +16,9 @@
 - 📱 完全适配移动设备
 - 🔄 输入框高度自适应
 - 🔒 API Key后端存储，不暴露给前端
+- 🗂️ 对话记录栏：登录后显示历史对话，支持新建、切换、删除对话
+- 🧠 对话记忆：多轮对话自动维护上下文（参考DeepSeek多轮对话API）
+- 💾 摘要压缩：对话过长时自动压缩早期内容为摘要以节约Token成本，且不影响历史记录按原样保存展示
 
 ### 管理员功能
 - 📊 用户Token消耗统计页面
@@ -33,7 +36,8 @@ my-chat-v2-frontend/
 ├── config.json          # 配置文件（敏感信息，不提交到Git）
 ├── .gitignore           # Git忽略文件
 ├── sql/
-│   └── create_table.sql # 数据库建表脚本
+│   ├── create_table.sql   # 数据库建表脚本（V1）
+│   └── create_table_v2.sql # 对话历史表脚本（V2，新增）
 ├── src/                 # 静态资源
 │   ├── beijing.jpg      # 背景图片
 │   ├── bot-avatar.png   # 机器人头像
@@ -104,7 +108,7 @@ npm install
 
 ### 4. 创建数据库
 
-登录MySQL并执行建表脚本：
+登录MySQL并执行建表脚本（需按顺序执行 V1 和 V2 两个脚本）：
 
 ```bash
 mysql -u root -p
@@ -114,16 +118,10 @@ mysql -u root -p
 
 ```sql
 source /path/to/project/sql/create_table.sql;
+source /path/to/project/sql/create_table_v2.sql;
 ```
 
-或者手动执行：
-
-```sql
-CREATE DATABASE IF NOT EXISTS lwl_chat DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE lwl_chat;
-
--- 然后执行 create_table.sql 中的建表语句
-```
+> **注意**：`create_table_v2.sql` 用于对话历史和对话记忆功能（V2版本新增），如项目已运行过 V1，只需执行 V2 脚本即可。
 
 ### 5. 设置管理员账号
 
@@ -197,7 +195,16 @@ y = 2
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/chat` | AI对话（SSE流式输出） |
+| POST | `/api/chat` | AI对话（SSE流式输出，支持对话记忆与摘要压缩） |
+
+### 对话历史功能
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/conversations` | 创建新对话会话 |
+| GET | `/api/conversations` | 获取当前用户的对话列表 |
+| GET | `/api/conversations/:id` | 获取单个对话详情（含消息） |
+| DELETE | `/api/conversations/:id` | 删除对话（软删除） |
 
 ### 管理员功能
 
@@ -229,6 +236,31 @@ y = 2
 | total_tokens | INT | 总Token数 |
 | model | VARCHAR(50) | 使用的模型 |
 | created_at | DATETIME | 创建时间 |
+
+### conversations表（V2新增：对话会话表）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INT | 主键，自增 |
+| user_id | INT | 所属用户ID，外键 |
+| title | VARCHAR(200) | 对话标题（用于左侧列表展示） |
+| model | VARCHAR(50) | 会话使用的模型 |
+| summary | TEXT | 压缩摘要（用于对话记忆，节约成本，不影响原始记录） |
+| summary_message_count | INT | 已压缩进摘要的消息条数 |
+| message_count | INT | 消息总条数 |
+| is_active | TINYINT(1) | 是否有效：1-有效，0-已删除 |
+| created_at | DATETIME | 创建时间 |
+| updated_at | DATETIME | 最后活跃时间 |
+
+### chat_messages表（V2新增：对话消息表）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INT | 主键，自增 |
+| conversation_id | INT | 所属会话ID，外键 |
+| role | VARCHAR(20) | 消息角色：user/assistant/system |
+| content | LONGTEXT | 消息内容（按原样保存，用于历史展示） |
+| created_at | DATETIME | 消息时间 |
 
 ## 部署到服务器
 
@@ -285,7 +317,8 @@ services:
       MYSQL_DATABASE: lwl_chat
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./sql/create_table.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./sql/create_table.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./sql/create_table_v2.sql:/docker-entrypoint-initdb.d/02-init_v2.sql
     ports:
       - "3306:3306"
     restart: always
@@ -312,3 +345,6 @@ volumes:
 - [x] Token消耗统计
 - [x] API Key后端存储
 - [x] 流式输出
+- [x] 对话历史记录（左侧栏展示、新建、切换、删除）
+- [x] 对话记忆（多轮对话上下文维护）
+- [x] 摘要压缩（节约Token成本，不影响原样记录）
