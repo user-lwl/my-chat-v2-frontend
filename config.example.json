@@ -1,0 +1,21 @@
+{
+  "deepseek": {
+    "apiKey": "sk-在此填写你的密钥",
+    "baseUrl": "https://api.deepseek.com"
+  },
+  "database": {
+    "host": "localhost",
+    "port": 3306,
+    "user": "lwl_chat",
+    "password": "在此填写数据库密码",
+    "database": "lwl_chat"
+  },
+  "server": {
+    "port": 3001,
+    "sessionTimeout": 86400000,
+    "https": false
+  },
+  "security": {
+    "dailyTokenQuota": 50000
+  }
+}

@@ -539,11 +539,6 @@ async function handleSendMessage() {
     // 获取AI回复（流式响应已在fetchAIResponse中显示）
     const result = await fetchAIResponse(userMessage);
     
-    // 记录Token消耗
-    if (result && result.tokenUsage) {
-      await logTokenUsage(result.tokenUsage);
-    }
-    
     // 发送成功后刷新对话列表（新会话首次发送后显示在列表中）
     if (result && result.conversationId) {
       currentConversationId = result.conversationId;
@@ -584,9 +579,6 @@ async function fetchAIResponse(message) {
     <span>AI正在思考...</span>
   `;
   messageContent.appendChild(loadingElement);
-  
-  // 记录输入Token的估算
-  const inputTokens = estimateTokens(message);
   
   try {
     const response = await fetch(`${API_BASE}/api/chat`, {
@@ -770,17 +762,10 @@ async function fetchAIResponse(message) {
     // 完成时添加到对话历史
     conversationHistory.push({ role: 'assistant', content: fullResponse });
     
-    // 估算输出Token
-    const outputTokens = estimateTokens(fullResponse);
-    
+    // 用量由服务端在流式响应结束时统一记录，前端不再上报
     return {
       content: fullResponse,
-      conversationId: responseConversationId,
-      tokenUsage: {
-        model: selectedModel,
-        inputTokens: inputTokens,
-        outputTokens: outputTokens
-      }
+      conversationId: responseConversationId
     };
     
   } catch (error) {
@@ -796,33 +781,6 @@ async function fetchAIResponse(message) {
     // 确保加载状态被重置
     isProcessing = false;
     toggleLoadingState(false);
-  }
-}
-
-// 估算Token数量（简化版）
-function estimateTokens(text) {
-  if (!text) return 0;
-  // 简化估算：中文每个字符约1.3个Token，英文每个单词约1个Token
-  const chineseChars = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
-  const englishWords = (text.match(/[a-zA-Z]+/g) || []).length;
-  return Math.ceil(chineseChars * 1.3 + englishWords);
-}
-
-// 记录Token消耗
-async function logTokenUsage(tokenUsage) {
-  if (!isLoggedIn) return;
-  
-  try {
-    await fetch(`${API_BASE}/api/log-token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      credentials: 'include',
-      body: JSON.stringify(tokenUsage)
-    });
-  } catch (error) {
-    console.error('记录Token消耗失败:', error);
   }
 }
 

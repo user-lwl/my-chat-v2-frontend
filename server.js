@@ -13,7 +13,24 @@ try {
   config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
 } catch (error) {
   console.error('读取配置文件失败:', error.message);
+  console.error('请复制 config.example.json 为 config.json 并填写配置');
   process.exit(1);
+}
+
+// 环境变量优先（建议生产环境用环境变量注入，避免密钥落盘）
+if (process.env.DEEPSEEK_API_KEY) {
+  config.deepseek = config.deepseek || {};
+  config.deepseek.apiKey = process.env.DEEPSEEK_API_KEY;
+}
+if (process.env.DEEPSEEK_BASE_URL) {
+  config.deepseek.baseUrl = process.env.DEEPSEEK_BASE_URL;
+}
+if (process.env.DB_PASSWORD && config.database) {
+  config.database.password = process.env.DB_PASSWORD;
+}
+if (process.env.PORT) {
+  config.server = config.server || {};
+  config.server.port = Number(process.env.PORT);
 }
 
 // 端口配置
@@ -23,24 +40,111 @@ const PORT = config.server.port || 3001;
 const DEEPSEEK_API_KEY = config.deepseek.apiKey;
 const DEEPSEEK_BASE_URL = config.deepseek.baseUrl;
 
-// 模型映射
+// 模型映射（同时作为白名单：只允许映射表中出现的模型，防止客户端透传任意模型）
 const MODEL_MAP = {
   'deepseek-v4-flash': 'deepseek-v4-flash',    // DeepSeek-V4 Flash
   // 'deepseek-v4-pro': 'deepseek-v4-pro'   // DeepSeek-V4 Pro
 };
 
-// MIME类型映射
+// MIME类型映射（仅用于对外可公开的静态资源类型）
 const MIME_TYPES = {
   '.html': 'text/html',
   '.css': 'text/css',
   '.js': 'text/javascript',
-  '.json': 'application/json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.ico': 'image/x-icon',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
 };
+
+// ============================================================
+// 安全配置
+// ============================================================
+
+// 静态资源只允许这些后缀，其余一律 404（config.json / server.js / *.md / *.sql 等均不可访问）
+const STATIC_ALLOWED_EXT = new Set(Object.keys(MIME_TYPES));
+// 即使后缀命中，也禁止访问的文件名（纵深防御）
+const STATIC_DENY_FILENAMES = new Set([
+  'config.json', 'package.json', 'package-lock.json', 'server.js',
+  'config.example.json', 'readme.md'
+]);
+// 即使后缀命中，也禁止访问的目录（这些目录不对外提供任何静态文件）
+const STATIC_DENY_DIRS = ['sql', 'node_modules', '.git', '.trae', 'data', 'logs'];
+
+// 单次请求体上限（1MB），防止超大 body 打满内存
+const MAX_BODY_BYTES = 1024 * 1024;
+// 单次对话请求允许的消息条数与正文字符总量上限
+const MAX_MESSAGE_COUNT = 30;
+const MAX_TOTAL_CHARS = 20000;
+// 每个用户每日 token 配额（服务端统计，可在 config.json 中覆盖）
+const DAILY_TOKEN_QUOTA = Number(
+  (config.security && config.security.dailyTokenQuota) || process.env.DAILY_TOKEN_QUOTA || 50000
+);
+
+// 频率限制规则：窗口期内的最大请求次数
+const RATE_RULES = {
+  chat: { windowMs: 60 * 1000, max: 20 },          // 每分钟最多 20 次对话请求
+  login: { windowMs: 15 * 60 * 1000, max: 10 },    // 15 分钟最多 10 次登录尝试
+  register: { windowMs: 60 * 60 * 1000, max: 5 },  // 每小时最多注册 5 个账号
+  default: { windowMs: 60 * 1000, max: 60 }
+};
+
+const rateBuckets = new Map();
+
+// 获取客户端 IP（兼容 nginx 反代）
+function getClientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) {
+    return String(forwarded).split(',')[0].trim();
+  }
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+// 简单的滑动窗口限流，返回 true 表示放行
+function checkRateLimit(ruleKey, identity) {
+  const rule = RATE_RULES[ruleKey] || RATE_RULES.default;
+  const key = ruleKey + ':' + identity;
+  const now = Date.now();
+
+  let bucket = rateBuckets.get(key);
+  if (!bucket || now - bucket.start >= rule.windowMs) {
+    bucket = { start: now, count: 0 };
+    rateBuckets.set(key, bucket);
+  }
+  bucket.count += 1;
+
+  // 顺手清理过期桶，避免内存无限增长
+  if (rateBuckets.size > 5000) {
+    for (const [k, v] of rateBuckets) {
+      if (now - v.start > rule.windowMs) rateBuckets.delete(k);
+    }
+  }
+
+  return bucket.count <= rule.max;
+}
+
+// 让 sendJSON 能拿到请求来源，用于输出精确的 CORS 头
+function setCorsHeaders(res) {
+  const req = res.req;
+  const origin = req && req.headers ? req.headers.origin : null;
+  if (!origin) return;
+  const host = req.headers.host;
+  // 同源（或来源与 Host 一致的）才允许携带凭据的跨域请求
+  if (host && origin === 'http://' + host) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  } else if (host && origin === 'https://' + host) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  }
+}
 
 // 数据库配置
 const DB_CONFIG = {
@@ -77,6 +181,12 @@ async function initDatabase() {
   } catch (error) {
     console.error('数据库连接失败:', error.message);
     console.log('将使用内存存储作为备选方案');
+    // 释放半初始化的连接池，否则后续每次查询都会直连数据库并抛错，
+    // 与"内存备选方案"的预期行为不一致
+    try {
+      if (pool) await pool.end();
+    } catch (e) { /* 忽略关闭异常 */ }
+    pool = null;
     return false;
   }
 }
@@ -93,6 +203,69 @@ const memoryStorage = {
   nextChatMessageId: 1
 };
 
+// 粗略估算 token 数（中文约 1 字 ≈ 1.3 token，其余约 3 字符 ≈ 1 token）
+function estimateTokens(text) {
+  if (!text) return 0;
+  const s = String(text);
+  const chineseChars = (s.match(/[\u4e00-\u9fa5]/g) || []).length;
+  const otherChars = s.length - chineseChars;
+  return Math.ceil(chineseChars * 1.3 + otherChars / 3);
+}
+
+// 统计某个用户「今天」已消耗的 token（服务端统计，不信任前端上报）
+async function getTodayTokenUsage(userId) {
+  if (pool) {
+    try {
+      const [rows] = await pool.query(
+        'SELECT COALESCE(SUM(total_tokens), 0) AS total FROM token_usage WHERE user_id = ? AND created_at >= CURDATE()',
+        [userId]
+      );
+      return Number(rows[0] && rows[0].total) || 0;
+    } catch (error) {
+      console.error('查询当日用量失败:', error);
+      return 0;
+    }
+  }
+
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  return memoryStorage.tokenUsage
+    .filter(r => r.user_id === userId && new Date(r.created_at) >= startOfDay)
+    .reduce((sum, r) => sum + r.total_tokens, 0);
+}
+
+// 校验并规整客户端传来的消息数组，返回 { ok, message, messages }
+function validateMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { ok: false, message: '消息列表不能为空' };
+  }
+  if (messages.length > MAX_MESSAGE_COUNT) {
+    return { ok: false, message: `单次请求最多 ${MAX_MESSAGE_COUNT} 条消息` };
+  }
+
+  let totalChars = 0;
+  const cleaned = [];
+  for (const item of messages) {
+    if (!item || typeof item !== 'object') {
+      return { ok: false, message: '消息格式不正确' };
+    }
+    const role = item.role;
+    if (role !== 'user' && role !== 'assistant' && role !== 'system') {
+      return { ok: false, message: '消息角色不合法' };
+    }
+    if (typeof item.content !== 'string') {
+      return { ok: false, message: '消息内容必须是字符串' };
+    }
+    totalChars += item.content.length;
+    if (totalChars > MAX_TOTAL_CHARS) {
+      return { ok: false, message: `单次请求总内容不能超过 ${MAX_TOTAL_CHARS} 字符` };
+    }
+    cleaned.push({ role, content: item.content });
+  }
+
+  return { ok: true, messages: cleaned };
+}
+
 // ============================================================
 // 对话历史配置
 // ============================================================
@@ -108,18 +281,32 @@ function generateSessionId() {
   return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
-// 解析请求体
+// 解析请求体（带大小上限）
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
+    let size = 0;
+    let aborted = false;
     req.on('data', chunk => {
+      if (aborted) return;
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        aborted = true;
+        const err = new Error('请求体过大');
+        err.statusCode = 413;
+        reject(err);
+        return;
+      }
       body += chunk.toString();
     });
     req.on('end', () => {
+      if (aborted) return;
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch (e) {
-        reject(e);
+        const err = new Error('请求体不是合法的 JSON');
+        err.statusCode = 400;
+        reject(err);
       }
     });
     req.on('error', reject);
@@ -128,14 +315,30 @@ function parseBody(req) {
 
 // 发送JSON响应
 function sendJSON(res, statusCode, data) {
+  setCorsHeaders(res);
   res.writeHead(statusCode, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Cookie',
-    'Access-Control-Allow-Credentials': 'true'
+    'Content-Type': 'application/json; charset=utf-8',
+    'X-Content-Type-Options': 'nosniff'
   });
   res.end(JSON.stringify(data));
+}
+
+// 把上游 HTTP 状态码翻译成用户能看懂的提示（避免把裸数字抛给前端）
+function mapUpstreamError(statusCode) {
+  switch (statusCode) {
+    case 401:
+      return 'AI 服务密钥无效，请联系管理员检查配置';
+    case 402:
+      return 'AI 服务账户余额不足，请联系管理员充值后再试';
+    case 429:
+      return 'AI 服务当前请求过于频繁，请稍后再试';
+    case 500:
+    case 502:
+    case 503:
+      return 'AI 服务暂时不可用，请稍后再试';
+    default:
+      return `AI 服务调用失败（${statusCode}）`;
+  }
 }
 
 // 设置Cookie
@@ -144,6 +347,8 @@ function setCookie(res, name, value, options = {}) {
   if (options.path) cookie += `; Path=${options.path}`;
   if (options.httpOnly) cookie += '; HttpOnly';
   if (options.maxAge) cookie += `; Max-Age=${options.maxAge}`;
+  cookie += '; SameSite=' + (options.sameSite || 'Lax');
+  if (options.secure) cookie += '; Secure';
   res.setHeader('Set-Cookie', cookie);
 }
 
@@ -504,11 +709,10 @@ async function handleAPIRequest(req, res, parsedUrl) {
   
   // 处理CORS预检请求
   if (method === 'OPTIONS') {
+    setCorsHeaders(res);
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Cookie',
-      'Access-Control-Allow-Credentials': 'true'
+      'Access-Control-Allow-Headers': 'Content-Type, Cookie'
     });
     res.end();
     return;
@@ -517,6 +721,11 @@ async function handleAPIRequest(req, res, parsedUrl) {
   try {
     // 注册接口
     if (pathname === '/api/register' && method === 'POST') {
+      // 限制单 IP 注册频率，防止脚本批量注册账号白嫖额度
+      if (!checkRateLimit('register', getClientIp(req))) {
+        return sendJSON(res, 429, { success: false, message: '注册过于频繁，请稍后再试' });
+      }
+
       const body = await parseBody(req);
       const { username, password } = body;
       
@@ -542,6 +751,11 @@ async function handleAPIRequest(req, res, parsedUrl) {
     
     // 登录接口
     if (pathname === '/api/login' && method === 'POST') {
+      // 限制登录尝试频率，防止撞库
+      if (!checkRateLimit('login', getClientIp(req))) {
+        return sendJSON(res, 429, { success: false, message: '登录尝试过于频繁，请 15 分钟后再试' });
+      }
+
       const body = await parseBody(req);
       const { username, password } = body;
       
@@ -566,7 +780,9 @@ async function handleAPIRequest(req, res, parsedUrl) {
       // 设置Cookie
       setCookie(res, 'sessionId', sessionId, {
         path: '/',
-        httpOnly: false,
+        httpOnly: true,
+        sameSite: 'Lax',
+        secure: !!(config.server && config.server.https),
         maxAge: SESSION_TIMEOUT / 1000
       });
       
@@ -677,29 +893,14 @@ async function handleAPIRequest(req, res, parsedUrl) {
       return sendJSON(res, 200, { success: true, message: '登出成功' });
     }
     
-    // 记录Token消耗接口
+    // 记录Token消耗接口（已废弃）
+    // 说明：原先由前端上报 token 数，数据可被任意伪造/忽略，统计与配额形同虚设。
+    // 现在用量在 /api/chat 的响应流结束时由服务端记录，此接口仅保留兼容，不再写库。
     if (pathname === '/api/log-token' && method === 'POST') {
-      const cookies = parseCookies(req);
-      const sessionId = cookies.sessionId;
-      
-      if (!sessionId || !sessions.has(sessionId)) {
-        return sendJSON(res, 401, { success: false, message: '未登录' });
-      }
-      
-      const session = sessions.get(sessionId);
-      const body = await parseBody(req);
-      const { model, inputTokens, outputTokens } = body;
-      
-      if (!model || inputTokens === undefined || outputTokens === undefined) {
-        return sendJSON(res, 400, { success: false, message: '缺少必要参数' });
-      }
-      
-      try {
-        await logTokenUsage(session.userId, model, inputTokens, outputTokens);
-        return sendJSON(res, 200, { success: true, message: 'Token消耗已记录' });
-      } catch (error) {
-        return sendJSON(res, 500, { success: false, message: '记录失败: ' + error.message });
-      }
+      return sendJSON(res, 200, {
+        success: false,
+        message: '该接口已废弃，用量由服务端自动统计'
+      });
     }
     
     // 创建新对话接口
@@ -810,12 +1011,38 @@ async function handleAPIRequest(req, res, parsedUrl) {
       const body = await parseBody(req);
       const { model, messages, conversationId } = body;
       
-      if (!model || !messages || !Array.isArray(messages) || messages.length === 0) {
+      if (!model || !messages) {
         return sendJSON(res, 400, { success: false, message: '缺少必要参数' });
       }
-      
+
+      // 1) 频率限制：按用户 + IP 双重限制，防止单账号脚本轰炸
+      if (!checkRateLimit('chat', 'u' + session.userId) || !checkRateLimit('chat', getClientIp(req))) {
+        return sendJSON(res, 429, { success: false, message: '请求过于频繁，请稍后再试' });
+      }
+
+      // 2) 模型白名单：不在映射表里的模型一律拒绝，避免被用来调用更贵的模型
+      if (!Object.prototype.hasOwnProperty.call(MODEL_MAP, model)) {
+        return sendJSON(res, 400, { success: false, message: '不支持的模型' });
+      }
+
+      // 3) 消息规整与长度上限：防止单次请求塞入超长上下文烧额度
+      const validated = validateMessages(messages);
+      if (!validated.ok) {
+        return sendJSON(res, 400, { success: false, message: validated.message });
+      }
+      const safeMessages = validated.messages;
+
+      // 4) 每日配额：服务端统计当日用量，超限直接拒绝
+      const todayUsage = await getTodayTokenUsage(session.userId);
+      if (DAILY_TOKEN_QUOTA > 0 && todayUsage >= DAILY_TOKEN_QUOTA) {
+        return sendJSON(res, 429, {
+          success: false,
+          message: `今日额度已用完（${todayUsage}/${DAILY_TOKEN_QUOTA}），请明天再试`
+        });
+      }
+
       // 映射模型名称
-      const mappedModel = MODEL_MAP[model] || model;
+      const mappedModel = MODEL_MAP[model];
       
       // ---- 对话历史保存与对话记忆逻辑 ----
       // 确定会话ID：若未指定则创建一个新会话
@@ -825,6 +1052,7 @@ async function handleAPIRequest(req, res, parsedUrl) {
       let shouldSummarizeAfter = false;
       let allMessagesAfterSave = null;
       let deepSeekMessages = null;
+      let upstreamUsage = null;
       
       try {
         // 如果没有 conversationId，创建新会话
@@ -833,7 +1061,7 @@ async function handleAPIRequest(req, res, parsedUrl) {
           convId = conv.id;
           isNewConversation = true;
           // 更新标题为第一条用户消息
-          const firstUserMsg = messages.find(m => m.role === 'user');
+          const firstUserMsg = safeMessages.find(m => m.role === 'user');
           if (firstUserMsg && firstUserMsg.content) {
             await updateConversationTitle(convId, firstUserMsg.content);
           }
@@ -846,7 +1074,7 @@ async function handleAPIRequest(req, res, parsedUrl) {
         }
         
         // 保存用户消息到历史
-        const lastMessage = messages[messages.length - 1];
+        const lastMessage = safeMessages[safeMessages.length - 1];
         if (lastMessage && lastMessage.role === 'user') {
           await saveMessage(convId, 'user', lastMessage.content);
         }
@@ -866,7 +1094,7 @@ async function handleAPIRequest(req, res, parsedUrl) {
           ];
         } else {
           // 无摘要：直接使用全部消息
-          deepSeekMessages = messages;
+          deepSeekMessages = safeMessages;
         }
         
         // 判断是否需要压缩（消息条数达到阈值）
@@ -880,7 +1108,7 @@ async function handleAPIRequest(req, res, parsedUrl) {
       // 构建DeepSeek请求
       const requestBody = {
         model: mappedModel,
-        messages: (deepSeekMessages && deepSeekMessages.length) ? deepSeekMessages : messages,
+        messages: (deepSeekMessages && deepSeekMessages.length) ? deepSeekMessages : safeMessages,
         stream: true
       };
       
@@ -902,12 +1130,12 @@ async function handleAPIRequest(req, res, parsedUrl) {
       };
       
       // 发送流式响应头
+      setCorsHeaders(res);
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Credentials': 'true'
+        'X-Content-Type-Options': 'nosniff'
       });
       
       // 向DeepSeek发送请求
@@ -919,7 +1147,7 @@ async function handleAPIRequest(req, res, parsedUrl) {
           });
           deepseekRes.on('end', () => {
             console.error('DeepSeek API错误:', deepseekRes.statusCode, errorData);
-            res.write(`data: ${JSON.stringify({ error: `API请求失败: ${deepseekRes.statusCode}` })}\n\n`);
+            res.write(`data: ${JSON.stringify({ error: mapUpstreamError(deepseekRes.statusCode) })}\n\n`);
             res.end();
           });
           return;
@@ -936,6 +1164,10 @@ async function handleAPIRequest(req, res, parsedUrl) {
               if (dataStr && dataStr !== '[DONE]') {
                 try {
                   const data = JSON.parse(dataStr);
+                  // 若上游返回了真实 usage，优先采用（配额统计以此为准）
+                  if (data.usage && typeof data.usage === 'object') {
+                    upstreamUsage = data.usage;
+                  }
                   const delta = data.choices?.[0]?.delta;
                   if (delta && delta.content && typeof delta.content === 'string') {
                     savedAssistantContent = (savedAssistantContent || '') + delta.content;
@@ -950,6 +1182,21 @@ async function handleAPIRequest(req, res, parsedUrl) {
         });
         
         deepseekRes.on('end', async () => {
+          // 记录本次真实用量（服务端统计，不再依赖前端上报）
+          try {
+            const inputText = (deepSeekMessages && deepSeekMessages.length ? deepSeekMessages : safeMessages)
+              .map(m => m.content).join('\n');
+            const inputTokens = (upstreamUsage && typeof upstreamUsage.prompt_tokens === 'number')
+              ? upstreamUsage.prompt_tokens
+              : estimateTokens(inputText);
+            const outputTokens = (upstreamUsage && typeof upstreamUsage.completion_tokens === 'number')
+              ? upstreamUsage.completion_tokens
+              : estimateTokens(savedAssistantContent);
+            await logTokenUsage(session.userId, model, inputTokens, outputTokens);
+          } catch (error) {
+            console.error('记录Token消耗失败:', error);
+          }
+
           // 保存助手回复到历史
           if (convId && savedAssistantContent) {
             try {
@@ -998,53 +1245,102 @@ async function handleAPIRequest(req, res, parsedUrl) {
     
   } catch (error) {
     console.error('API请求错误:', error);
-    return sendJSON(res, 500, { success: false, message: '服务器内部错误' });
+    const status = error && error.statusCode ? error.statusCode : 500;
+    const message = status === 500 ? '服务器内部错误' : error.message;
+    return sendJSON(res, status, { success: false, message });
   }
 }
 
 // 处理静态文件请求
+// 安全策略：只对外提供「前端资源目录 + 可公开后缀」的文件，
+// 项目根目录下的 config.json / server.js / sql / 说明文件等一律不可访问。
 function handleStaticRequest(req, res, parsedUrl) {
-  let filePath = parsedUrl.pathname;
-  
-  // 处理根路径请求
-  if (filePath === '/') {
-    filePath = '/index.html';
+  let requestPath;
+  try {
+    requestPath = decodeURIComponent(parsedUrl.pathname);
+  } catch (e) {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('400 Bad Request');
+    return;
   }
-  
-  // 构建文件路径
-  filePath = path.join(__dirname, filePath);
-  
-  // 安全检查：防止目录遍历
-  if (!filePath.startsWith(__dirname)) {
-    res.writeHead(403);
+
+  // 处理根路径请求
+  if (requestPath === '/') {
+    requestPath = '/index.html';
+  }
+
+  // 拒绝空字节与路径穿越
+  if (requestPath.indexOf('\0') !== -1 || requestPath.split(/[\\/]/).indexOf('..') !== -1) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('403 Forbidden');
     return;
   }
-  
-  // 获取文件扩展名
-  const extname = path.extname(filePath);
-  
-  // 设置内容类型
-  const contentType = MIME_TYPES[extname] || 'application/octet-stream';
-  
+
+  // 解析成绝对路径
+  const rootDir = __dirname;
+  const filePath = path.resolve(rootDir, '.' + path.posix.normalize('/' + requestPath));
+
+  // 必须落在项目目录内（用相对路径判断，避免 /app 与 /application 这类前缀误判）
+  const relative = path.relative(rootDir, filePath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('403 Forbidden');
+    return;
+  }
+
+  const segments = relative.split(path.sep);
+
+  // 拒绝隐藏文件/隐藏目录（.env、.git、.trae 等）
+  if (segments.some(seg => seg.startsWith('.'))) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found');
+    return;
+  }
+
+  // 拒绝敏感目录
+  if (segments.length > 0 && STATIC_DENY_DIRS.indexOf(segments[0].toLowerCase()) !== -1) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found');
+    return;
+  }
+
+  const baseName = path.basename(filePath).toLowerCase();
+
+  // 拒绝敏感文件名
+  if (STATIC_DENY_FILENAMES.has(baseName)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found');
+    return;
+  }
+
+  // 只放行白名单后缀（config.json 因此天然不可访问）
+  const extname = path.extname(baseName);
+  const contentType = MIME_TYPES[extname];
+  if (!contentType || !STATIC_ALLOWED_EXT.has(extname)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found');
+    return;
+  }
+
   // 读取文件
   fs.readFile(filePath, (err, content) => {
     if (err) {
       if (err.code === 'ENOENT') {
-        // 文件不存在
-        console.log(`文件不存在: ${filePath}`);
-        res.writeHead(404);
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('404 Not Found');
       } else {
-        // 服务器错误
-        console.log(`服务器错误: ${err.code}`);
-        res.writeHead(500);
-        res.end(`服务器错误: ${err.code}`);
+        console.log(`静态资源读取失败: ${err.code}`);
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('500 Internal Server Error');
       }
     } else {
       // 成功响应
-      res.writeHead(200, { 'Content-Type': contentType });
-      res.end(content, 'utf-8');
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'same-origin'
+      });
+      res.end(content);
     }
   });
 }

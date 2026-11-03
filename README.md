@@ -84,7 +84,14 @@ npm install
 
 ### 3. 创建配置文件
 
-复制配置示例并填写您的信息：
+复制配置模板并填写您的信息：
+
+```bash
+cp config.example.json config.json
+vi config.json
+```
+
+配置项说明：
 
 ```json
 {
@@ -95,16 +102,25 @@ npm install
   "database": {
     "host": "localhost",
     "port": 3306,
-    "user": "root",
-    "password": "123456",
+    "user": "lwl_chat",
+    "password": "your-db-password",
     "database": "lwl_chat"
   },
   "server": {
     "port": 3001,
-    "sessionTimeout": 86400
+    "sessionTimeout": 86400000
+  },
+  "security": {
+    "dailyTokenQuota": 50000
   }
 }
 ```
+
+> **安全提示**
+> - `config.json` 已在 `.gitignore` 中，**不要提交到仓库**。
+> - 更推荐用环境变量注入密钥，避免明文落盘：`DEEPSEEK_API_KEY`、`DB_PASSWORD`、`PORT`，环境变量优先级高于配置文件。
+> - 服务端只会对外提供 html/css/js/图片/字体这几类静态资源，`.json`、`.md`、`.sql` 及隐藏文件一律返回 404，因此 `config.json` 不会被公网下载。
+> - 如需调整单用户每日 token 上限，改 `security.dailyTokenQuota`（单位：token/天/用户）。
 
 ### 4. 创建数据库
 
